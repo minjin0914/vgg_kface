@@ -1,0 +1,264 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import cv2 as cv
+import os
+import sys
+
+//드라이브 mount
+from google.colab import drive # 추가된 부분
+drive.mount('/content/drive')
+
+! pip install deepface //추가된 부분
+
+from tensorflow.keras.layers import Input, Dense, Activation, Concatenate,Dropout,ZeroPadding2D
+from tensorflow.keras.layers import Flatten, AveragePooling2D,MaxPooling2D, GlobalAveragePooling2D
+from tensorflow.keras.models import Model ,load_model
+from tensorflow.keras.layers import Conv2D,Dropout,Lambda,PReLU, LeakyReLU,BatchNormalization
+import tensorflow as tf
+from tensorflow.keras.regularizers import l2
+from tensorflow.keras.losses import BinaryCrossentropy
+from tensorflow.keras import backend as k
+leaky_relu = LeakyReLU(alpha=0.01)
+from tensorflow.keras.optimizers import Adam, SGD
+from tensorflow.keras.layers import add, Activation
+//from tensorflow.keras.applications import Inceptio
+from deepface.basemodels import Facenet,VGGFace
+
+//create model
+vgg = VGGFace.baseModel()
+vgg.summary()
+
+! pip install gdown
+! gdown https://drive.google.com/uc?id=1mu069sZFgaHfVIP5TxPjCxf1bsE2X3Tm 
+  // 추가된 부분. Face_recognition에서 불러왔던 가중치를 여기에 불러옴
+
+vgg.load_weights('/content/vgg_face_weights.h5')
+
+size = 224
+shape = (size,size,3)
+
+cnt = 0
+print(len(vgg.layers))
+for lyer in vgg.layers: # 35, 36층은 Con2d, flatten인데 실질적으로 이중에서 파라미터가 있는 층은 Conv2D라서 Conv2D만 학습
+    if cnt>34: # vggface 학습 동결
+        lyer.trainable= True
+        lyer.activation= tf.keras.layers.Activation('tanh')
+        print(lyer)
+    else:
+        lyer.trainable =False
+    cnt = cnt+1
+print(vgg.layers[-2])
+//Remove Last Softmax layer and get model upto last flatten layer with outputs 2622 units
+vgg_face = Model(inputs=vgg.layers[0].input, outputs=vgg.layers[-2].output)
+
+def create_model():
+inputs = Input(shape)
+//inputs = BatchNormalization(axis= -1)(inputs)
+outputs = vgg_face(inputs)
+//flatten layer 삭제
+
+model = Model(inputs,outputs)
+print(vgg_face.summary())
+print(model.summary())
+return model
+
+extractor = create_model() # representation vector extractor
+
+imgA = Input(shape=shape)
+imgB = Input(shape=shape)
+featA = extractor(imgA) //vggface의 마지막 flatten의 결과 represntation vector(feature vector) 추출
+featB = extractor(imgB)
+//comb = Concatenate()([featA,featB])
+
+def euclidean_distance(vectors): # imgA와 imgB의 representation vector 거리 비교
+    (featA, featB) = vectors
+    sum_squared = k.sum(k.square(featA - featB), axis=1, keepdims=True)
+    return k.sqrt(k.maximum(sum_squared, k.epsilon()))
+
+//def findCosineDistance(vectors): # 코사인 유사도 측정, but 여러 오류 발생. 따로 더 시도해봐야 할 듯
+//    (featA, featB) = vectors
+//     a = k.dot(k.transpose(featA), featB)
+//     b = k.sum(featA*featB)
+//     c = k.sum(featA*featB)
+//     return 1 - (a / (k.sqrt(b) * k.sqrt(c)))
+
+distance = Lambda(findCosineDistance)([featA, featB])
+//distance = Lambda(findCosineDistance)([featA, featB])
+print(distance)
+outputs = Dense(1, activation="sigmoid", name = 'ddd')(distance) # sigmoid로 확률화
+model = Model(inputs=[imgA, imgB], outputs=outputs)
+model.summary()
+
+//train data
+def resz3(h,w,img):
+    hz = np.zeros((h,w,3))
+    for i in range(3):
+
+        hz[:,:,i] = cv.resize(img[:,:,i],(w,h))
+
+    return hz
+
+datadir = '/content/drive/MyDrive/Colab Notebooks/Face_Recognition/Images_crop'
+classes = [i for i in os.listdir(datadir)]
+print(classes)
+classes = classes[:35]
+print(classes)
+training=[]
+for clas in classes:
+    Path=os.path.join(datadir,clas)
+    print(Path)
+    label=classes.index(clas)
+    print(label)
+    for img in (os.listdir(Path)):
+        print(img)
+        imgarray= cv.imread(os.path.join(Path,img))
+        newimg =  resz3(size,size,imgarray)
+        /newimg=cv.resize(imgarray,(160,160))
+        training.append([newimg,label])
+import random
+random.shuffle(training)
+x=[] // train data
+y=[] // train label
+for fea,labl in training:
+    x.append(fea)
+    y.append(labl)
+x=np.array(x)
+y=np.array(y)
+//y = tf.one_hot(y,2)
+print(x.shape)
+print(y)
+
+def preprocess_pairs(images, labels,classes):
+    targets = [j for j in range(len(classes))]
+    label_indices = {}
+    for label in targets:
+        label_indices.setdefault(label,[index for index, curr_label in enumerate(labels) if label == curr_label]) # image들의 각 index가 어느 label(class)에 속하는지 정의
+        print(label_indices)
+        #list comprehension
+
+    pimages = []
+    plabels = []
+    for i, image in enumerate(images):
+      pos_indices = label_indices.get(labels[i]) // i번째 image와 동일한 class에 속하는 모든 index를 꺼내옴
+      pos_image = images[np.random.choice(pos_indices)] // i번째 image와 동일한 class 속하는 index 들 중에 random으로 꺼내온 index의 이미지를 저장
+      pimages.append((image, pos_image)) // i번째 image와 i번째 image와 동일한 class를 가진 다른 random image로 이루어진 pair(양성 image pair)
+      plabels.append(1) // 양성 image pair는 1로 labeling
+
+      neg_indices = np.where(labels != labels[i]) // i번째 image와 다른 class 속하는 모든 index를 꺼내옴
+      neg_image = images[np.random.choice(neg_indices[0])] // 왜 다른 class에 속하는 image들 중에 0번째 image만 가져오는 거지???->어차피 다르다는 것만 학습하면 돼서?
+      pimages.append((image, neg_image)) // i번째 image와 i번째 image와 다른 class에 속하는 image로 이루어진 pair(음성 image pair)
+      plabels.append(0) // 음성 image pair는 0으로 labeling
+
+    return np.array(pimages), np.array(plabels)
+
+pairs , labels = preprocess_pairs(x,y,classes)
+print(len(pairs)) // 음성, 양성 두 개 씩이라 x2
+print(pairs.shape)
+print(labels)
+
+(sys.getsizeof(pairs)/1024)/1024
+
+show = 10
+img1,img2 = pairs[show]
+
+print(labels[show])
+plt.imshow((img1.astype(np.uint8)))
+plt.show()
+plt.imshow((img2.astype(np.uint8)))
+plt.show()
+
+//model training
+import pickle
+from tensorflow.keras.callbacks import TensorBoard,EarlyStopping
+//callback은 모델의 학습 과정에서 특정 이벤트가 발생할 때 호출되는 함수의 집합
+//tensorboard는 tf의 시각화 도구. 모델의 학습 과정과 성능을 시각적으로 모니터링
+//EarlyStopping은 지정된 조건을 충족할 때 학습을 조기 종료하는 기능
+import datetime
+logg = "logs3"
+tfcallback = TensorBoard(log_dir=logg) //log_dir는 로그 파일의 저장 위치를 지정
+
+model.compile(loss="binary_crossentropy", optimizer= Adam(0.001), metrics=["accuracy"])
+
+model.fit([pairs[:, 0], pairs[:, 1]], labels[:],validation_split=0.2,batch_size = 32, # training data는 pairs[:,0], pairs[:,1] 두 개. label은 labels[:]
+          epochs=65,verbose=2)
+
+keyss = model.history.history // 모델의 학습 이력 정보(history)를 가져옴
+nn = len(keyss['loss'])
+
+plt.plot(np.arange(nn),keyss['loss'],color='green',label='loss')
+plt.legend() //legend는 그래프의 범례 표시
+plt.plot(np.arange(nn),keyss['val_loss'],color='black',label = 'val_loss')
+plt.legend()
+plt.plot(np.arange(nn),keyss['accuracy'],color='red',label = 'accurcy')
+plt.legend()
+plt.plot(np.arange(nn),keyss['val_accuracy'],color='purple',label = 'val_accu')
+plt.legend()
+plt.xlim(0,90)
+plt.ylim(0,1)
+plt.show()
+
+def findCosineDistance(source_representation, test_representation):
+    a = np.matmul(np.transpose(source_representation), test_representation)
+    b = np.sum(np.multiply(source_representation, source_representation))
+    c = np.sum(np.multiply(test_representation, test_representation))
+    return 1 - (a / (np.sqrt(b) * np.sqrt(c)))
+def l2_normalize(xx):
+    return xx / np.sqrt(np.sum(np.multiply(xx, xx)))
+def findEuclideanDistance(source_representation, test_representation):
+    if type(source_representation) == list:
+        source_representation = np.array(source_representation)
+
+    if type(test_representation) == list:
+        test_representation = np.array(test_representation)
+
+    euclidean_distance = source_representation - test_representation
+    euclidean_distance = np.sum(np.multiply(euclidean_distance, euclidean_distance))
+    euclidean_distance = np.sqrt(euclidean_distance)
+    return euclidean_distance
+
+//model testing
+from scipy import spatial
+datadir = '/content/drive/MyDrive/Colab Notebooks/Face_Recognition/Images_crop'
+classes = [i for i in os.listdir(datadir)]
+db = []
+for clas in classes:
+    path = os.path.join(datadir,clas)
+    for img in os.listdir(path):
+        img2= cv.imread(os.path.join(path,img))
+        img2 = resz3(224,224,img2)
+        //newimg=cv.resize(imgarray,(160,160))
+        db.append(np.array(img2)) # db는 training images(15)
+print(classes) # class를 얻기 위함
+Path = '/content/drive/MyDrive/Colab Notebooks/Face_Recognition/Test_Images_crop'
+
+for img in (os.listdir(Path)):
+    print(img)
+    imgarray= cv.imread(os.path.join(Path,img))
+    imgsc =  resz3(size,size,imgarray)
+    plt.imshow((imgsc.astype(np.uint8)))
+    plt.show()
+    imgsc = imgsc.reshape(-1,size,size,3,1)
+    f1 = extractor.predict(imgsc) // f1은 representation vector
+    //f1 = l2_normalize(f1)
+    //newimg=cv.resize(imgarray,(160,160))
+    dist = []
+    for imgref in db:                                           // training dataset 내 모든 data와 비교
+
+        imgref = resz3(size,size,imgref)
+        //plt.imshow((imgref.astype(np.uint8)))
+        //plt.show()
+        f2 = extractor.predict(imgref.reshape(-1,size,size,3,1))
+        f1=f1.reshape((-1,))
+        f2=f2.reshape((-1,))
+        dis = spatial.distance.cosine(f1,f2) // training images와 test image 사이의 거리
+        //f2 = l2_normalize(f2)
+        //sum_squared = k.sum(k.square(f1 - f2), axis=1)
+        //dis = k.sqrt(k.maximum(sum_squared,k.epsilon()))
+
+        dist.append(dis)
+    print(np.round(dist,9))
+    print(y[np.argmin(dist)])                                    // training images 중 거리가 가장 작은 image의 index. 이 index가 속한 y(label) 출력
+
+
+
+    #print(classes[np.argmin(dist)])
